@@ -1,0 +1,16 @@
+services:
+  baidu-auto-save:
+    build: .
+    container_name: baidu-auto-save
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+      - ./config:/app/config
+    working_dir: /app
+    environment:
+      - TZ=Asia/Shanghai
+      # 可选：用环境变量覆盖 config.yaml 中的同名配置
+      # - APP_PASSWORD=your_password
+      # - DATA_DIR=/data
