@@ -26,7 +26,7 @@
 docker run -d \
   --name baidu-auto-save \
   -p 8080:8080 \
-  -v ./data:/data \
+  -v ./data:/app/data \
   -v ./config:/app/config \
   -e TZ=Asia/Shanghai \
   injoyai/baidu-auto-save:latest
