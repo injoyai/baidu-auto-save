@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch, onBeforeUnmount, nextTick } from 'vue'
+import { ref, computed, watch, onBeforeUnmount, nextTick } from 'vue'
 import api from '../api'
 
 const props = defineProps({
@@ -14,8 +14,29 @@ const done = ref(0)
 const total = ref(0)
 const logs = ref([])
 const running = ref(false)
+const result = ref('') // success | skipped | failed（结束后）
+const resultMsg = ref('')
 const logBox = ref(null)
 let timer = null
+// 是否已经通知过父级（finished 事件只发一次）
+let notified = false
+// 后端快照是否存在（重启后无快照，结果标签避免误显示「成功」）
+const hasSnapshot = ref(false)
+// 已结束（快照标记结束，或后端已不在运行且无快照）
+const finished = computed(() => hasSnapshot.value && !running.value)
+
+// 是否处于「转存中」阶段（有量化进度）；其他阶段无进度可言
+const transferPhase = computed(() => hasSnapshot.value && total.value > 0)
+const pct = computed(() => total.value > 0 ? Math.min(100, Math.round((done.value / total.value) * 100)) : 0)
+
+const resultText = computed(() => {
+  if (!finished.value) return '已结束'
+  return { success: '成功', skipped: '无新增', failed: '失败' }[result.value] || '已结束'
+})
+const resultType = computed(() => {
+  if (!finished.value) return 'info'
+  return { success: 'success', skipped: 'info', failed: 'danger' }[result.value] || 'info'
+})
 
 watch(() => props.modelValue, (v) => {
   visible.value = v
@@ -24,22 +45,27 @@ watch(() => props.modelValue, (v) => {
   } else {
     stopPoll()
   }
-})
+}, { immediate: true }) // 组件挂载时 modelValue 已为 true（v-if 创建即打开），必须立即执行
 watch(visible, (v) => emit('update:modelValue', v))
 
 async function poll() {
   try {
     const d = await api.get(`/tasks/${props.task.id}/status`)
+    hasSnapshot.value = d.stage !== '' || (d.logs && d.logs.length > 0) || !!d.result
     stage.value = d.stage
     done.value = d.done
     total.value = d.total
     logs.value = d.logs
     running.value = !!d.running
-    // 进度条百分比：Total=0（未到计数阶段）时用不确定动画
-    if (!d.running && d.finished !== false) {
-      // 快照已过期或已结束：停轮询，通知父级刷新列表
+    result.value = d.result || ''
+    resultMsg.value = d.resultMsg || ''
+    if (!d.running) {
+      // 运行结束（或后端无快照如刚重启）：停轮询；有快照时通知列表刷新一次
       stopPoll()
-      emit('finished')
+      if (!notified) {
+        notified = true
+        emit('finished')
+      }
     }
   } catch {
     /* 轮询失败静默，下轮重试 */
@@ -79,28 +105,38 @@ onBeforeUnmount(stopPoll)
         <div class="flow" aria-hidden="true"><span></span><span></span><span></span></div>
         <span class="dlg-title">运行详情 · {{ task?.name }}</span>
         <el-tag v-if="running" type="primary" size="small" effect="light" round>执行中</el-tag>
-        <el-tag v-else type="success" size="small" effect="light" round>已结束</el-tag>
+        <el-tag v-else :type="resultType" size="small" effect="light" round>{{ resultText }}</el-tag>
       </div>
     </template>
 
-    <!-- 阶段 + 进度 -->
+    <!-- 阶段 + 进度：仅在「转存中」阶段显示真实 done/total，
+         其余阶段（访问/验证/遍历/去重）无量化进度，用流动动画表达「进行中」不显示数字 -->
     <div class="run-progress">
       <div class="stage-line">
-        <span class="stage">{{ stage || (running ? '等待执行' : '—') }}</span>
-        <span class="mono count">{{ total > 0 ? `${done} / ${total}` : '' }}</span>
+        <span class="stage">{{ finished ? `完成：${resultText}` : (stage || (running ? '等待执行' : '—')) }}</span>
+        <span v-if="transferPhase" class="mono count">{{ done }} / {{ total }}</span>
       </div>
       <el-progress
-        :percentage="total > 0 ? Math.round((done / total) * 100) : 50"
-        :indeterminate="total === 0 && running"
-        :status="running ? '' : 'success'"
+        v-if="transferPhase"
+        :percentage="pct"
+        :status="finished ? (result === 'failed' ? 'exception' : 'success') : ''"
         :stroke-width="10"
-        :show-text="total > 0"
+      />
+      <el-progress
+        v-else-if="running"
+        :percentage="50"
+        indeterminate
+        :duration="3"
+        :show-text="false"
+        :stroke-width="10"
       />
     </div>
 
-    <!-- 实时日志 -->
+    <!-- 运行日志（结束后保留，可随时回看最后一次） -->
     <div ref="logBox" class="log-box mono">
-      <div v-if="logs.length === 0" class="log-empty">等待日志输出…</div>
+      <div v-if="logs.length === 0" class="log-empty">
+        {{ running ? '等待日志输出…' : '暂无运行记录（重启服务后只保留历史转存日志页的数据）' }}
+      </div>
       <div v-for="(l, i) in logs" :key="i" class="log-line">{{ l }}</div>
     </div>
   </el-dialog>

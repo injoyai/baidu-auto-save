@@ -52,12 +52,14 @@ type Engine struct {
 
 // LiveStatus 任务的实时运行状态（Engine.RunTask 各阶段更新）
 type LiveStatus struct {
-	Stage    string   `json:"stage"`              // 当前阶段描述
-	Done     int64    `json:"done"`               // 已处理文件数（去重+转存）
-	Total    int64    `json:"total"`              // 待转存文件总数（发现阶段结束后固定）
-	Logs     []string `json:"logs"`               // 运行日志（最新在后，上限 200 行）
-	Started  time.Time `json:"-"`                 // 开跑时间（内部用）
-	Finished bool     `json:"finished"`           // 本次运行是否已结束
+	Stage     string   `json:"stage"`      // 当前阶段描述
+	Done      int64    `json:"done"`       // 已转存文件数
+	Total     int64    `json:"total"`      // 待转存文件总数（发现阶段结束后固定）
+	Logs      []string `json:"logs"`       // 运行日志（最新在后，上限 200 行）
+	Result    string   `json:"result"`     // success | skipped | failed（结束后）
+	ResultMsg string   `json:"result_msg"` // 结果摘要
+	Started   time.Time `json:"-"`         // 开跑时间（内部用）
+	Finished  bool     `json:"finished"`   // 本次运行是否已结束
 }
 
 // liveLog 追加一行运行日志（运行结束后的日志经 TransferLog 落库，不在这里持久化）
@@ -110,7 +112,8 @@ func (e *Engine) RunTask(t *db.Task) (*Result, error) {
 	e.sem <- struct{}{}
 	defer func() { <-e.sem }()
 
-	// 初始化运行态快照（结束后保留 30s 供前端读到最终状态，随后清理）
+	// 初始化运行态快照：结束后保留到下次运行（供详情随时回看最后一次日志），
+	// 重启进程后内存清空，前端轮询自然拿不到（属预期，历史日志走落库的 TransferLog）
 	lv := &LiveStatus{Stage: "准备中", Logs: []string{}, Started: time.Now()}
 	e.mu.Lock()
 	e.live[t.ID] = lv
@@ -119,14 +122,6 @@ func (e *Engine) RunTask(t *db.Task) (*Result, error) {
 		e.mu.Lock()
 		lv.Finished = true
 		e.mu.Unlock()
-		time.AfterFunc(30*time.Second, func() {
-			e.mu.Lock()
-			// 仅清理已结束且未被新一轮覆盖的快照
-			if cur, ok := e.live[t.ID]; ok && cur == lv {
-				delete(e.live, t.ID)
-			}
-			e.mu.Unlock()
-		})
 	}()
 	e.liveLog(t.ID, "任务「%s」开始执行", t.Name)
 
@@ -144,7 +139,9 @@ func (e *Engine) RunTask(t *db.Task) (*Result, error) {
 		log.Printf("[engine] 写日志失败 task=%d: %v", t.ID, err)
 	}
 	res.LogID = id
-	e.liveLog(t.ID, "运行结束：%s（新转存 %d，跳过 %d）", resultString(res), res.NewFiles, res.Skipped)
+	lv.Result = resultString(res)
+	lv.ResultMsg = res.Message
+	e.liveLog(t.ID, "运行结束：%s（新转存 %d，跳过 %d）", lv.Result, res.NewFiles, res.Skipped)
 	return res, nil
 }
 

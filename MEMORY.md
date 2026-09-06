@@ -30,7 +30,7 @@
 - **转存错误处理**：百度「文件重复」响应 ErrNo 非 4，需同时匹配 ErrMsg contains 文件重复/已存在；同一分享不同目录可能存在同 MD5 文件，运行内需 seenMD5 map 去重（仅 DB 历史去重不够）。
 - **性能特征**：全量 3744 文件 ≈ 180 目录分组，瓶颈是 Mkdir 逐级串行请求 + 批次间 500ms 限速；首次慢属正常，后续增量只转新增 MD5 + 目录已存在（Mkdir 快速失败），显著加快。
 - `internal/scheduler`：动态 cron 管理（AddTask/RemoveTask/RunNow），启动时恢复 running→idle
-- **运行详情（2026-09-06）**：Engine 内置内存运行态上报（`live map[int64]*LiveStatus`，mu 保护，不落库）——RunTask 各阶段（访问分享页/验证提取码/遍历/去重/转存中 done/total/重命名）liveStage+liveLog 更新，日志上限 200 行（超出丢最旧），结束后快照保留 30s 供前端读最终状态再清理（防新一轮覆盖：指针比对）；API `GET /tasks/:id/status` 返回 {running(sched.Running), dbStatus, stage, done, total, logs, finished}；前端 `components/RunDialog.vue` 弹窗 1.5s 轮询展示阶段/进度条（total=0 时 indeterminate）/日志（自动滚底），结束自动停轮询并通知列表刷新；Tasks 列表运行中禁用「立即运行/删除」，状态标签和「详情」按钮均可打开 RunDialog
+- **运行详情（2026-09-06）**：Engine 内置内存运行态上报（`live map[int64]*LiveStatus`，mu 保护，不落库）——RunTask 各阶段（访问分享页/验证提取码/遍历/去重/转存中 done/total/重命名）liveStage+liveLog 更新，日志上限 200 行（超出丢最旧），**快照结束后保留到下次运行**（用户要求保留最后一次日志可回看；重启进程才清空，历史走落库 TransferLog）；LiveStatus 含 Result/ResultMsg；API `GET /tasks/:id/status` 返回 {running(sched.Running), dbStatus, stage, done, total, result, resultMsg, logs, finished}；前端 `components/RunDialog.vue` 弹窗 1.5s 轮询展示阶段/进度/日志（自动滚底），结束后停轮询并通知列表刷新一次；**进度条约定（用户反馈修正）**：仅「转存中」阶段（total>0）显示真实 done/total 数字进度，其余阶段（无量化进度）用 indeterminate 流动动画不显示数字，结束后 done<total 时进度条 exception 红/否则 success 绿，避免「刚开始就有假进度」「结束卡在半路」的误解；Tasks 列表运行中禁用「立即运行/删除」，状态标签和「详情」按钮均可打开 RunDialog（watch 必须 immediate:true，组件 v-if 创建时 modelValue 已 true）
 - `internal/notify`：4 渠道通知（企业微信/Server酱/Telegram/自定义 webhook）
 - `internal/api`：Gin 路由（JWT 认证 + 开放推送 X-API-Token）+ embed SPA 静态托管
 - `main.go`：加载 config/config.yaml（自动生成模板）→ env 覆盖 → 默认值校验；数据目录来自配置

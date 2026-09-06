@@ -233,6 +233,7 @@ func (s *Server) taskStatus(c *gin.Context) {
 		"stage":    "",
 		"done":     0,
 		"total":    0,
+		"result":   "",
 		"logs":     []string{},
 	}
 	if lv != nil {
@@ -243,6 +244,8 @@ func (s *Server) taskStatus(c *gin.Context) {
 		out["stage"] = lv.Stage
 		out["done"] = lv.Done
 		out["total"] = lv.Total
+		out["result"] = lv.Result
+		out["resultMsg"] = lv.ResultMsg
 		out["logs"] = logs
 		out["finished"] = lv.Finished
 	}
