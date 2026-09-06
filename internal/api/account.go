@@ -93,7 +93,7 @@ func (s *Server) createAccount(c *gin.Context) {
 	ok(c, gin.H{"id": id})
 }
 
-// updateAccount 更新 Cookie（失效后修复；Cookie 已在 UpdateAccountCookie 中重置为 active）
+// updateAccount 编辑账号：名称必填（可只改名），Cookie 可选（留空保留原值）
 func (s *Server) updateAccount(c *gin.Context) {
 	acc, err := s.pathIDAccount(c)
 	if err != nil {
@@ -104,14 +104,27 @@ func (s *Server) updateAccount(c *gin.Context) {
 		failBadRequest(c, "参数错误: "+err.Error())
 		return
 	}
-	bduss, stoken, errMsg := extractCookie(&req)
-	if errMsg != "" {
-		failBadRequest(c, errMsg)
+	if req.Name == "" {
+		failBadRequest(c, "账号名称不能为空")
 		return
 	}
-	if err := s.db.UpdateAccountCookie(acc.ID, bduss, stoken, "{}"); err != nil {
-		failErr(c, err)
-		return
+	// Cookie 有输入时才更新（并重置为 active）；否则仅改名，保留原 Cookie 与状态
+	if strings.TrimSpace(req.Cookie) != "" {
+		bduss, stoken, errMsg := extractCookie(&req)
+		if errMsg != "" {
+			failBadRequest(c, errMsg)
+			return
+		}
+		if err := s.db.UpdateAccountCookie(acc.ID, bduss, stoken, "{}"); err != nil {
+			failErr(c, err)
+			return
+		}
+	}
+	if req.Name != acc.Name {
+		if err := s.db.RenameAccount(acc.ID, req.Name); err != nil {
+			failErr(c, err)
+			return
+		}
 	}
 	ok(c, nil)
 }

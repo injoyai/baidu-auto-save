@@ -8,7 +8,7 @@ import Reveal from '../components/Reveal.vue'
 const list = ref([])
 const dlg = ref(false)
 const saving = ref(false)
-const editing = ref(null) // null=新增，否则为待修复账号 id
+const editing = ref(null) // null=新增，否则为待编辑账号 id
 const form = ref({ name: '', cookie: '' })
 
 async function load() {
@@ -21,19 +21,21 @@ function openAdd() {
   dlg.value = true
 }
 
-function openFix(acc) {
+function openEdit(acc) {
   editing.value = acc.id
-  form.value = { name: acc.name, cookie: '' }
+  form.value = { name: acc.name, cookie: acc.cookie || '' }
   dlg.value = true
 }
 
 async function save() {
-  if (!form.value.cookie.trim()) return ElMessage.warning('请粘贴 Cookie')
+  if (!form.value.name.trim()) return ElMessage.warning('请填写账号名称')
+  // 编辑时 Cookie 可选（留空保留原值），新建时必填
+  if (!editing.value && !form.value.cookie.trim()) return ElMessage.warning('请粘贴 Cookie')
   saving.value = true
   try {
     if (editing.value) {
       await api.put('/accounts/' + editing.value, form.value)
-      ElMessage.success('Cookie 已更新')
+      ElMessage.success('已保存')
     } else {
       await api.post('/accounts', form.value)
       ElMessage.success('账号已添加')
@@ -87,7 +89,7 @@ onMounted(load)
   <Reveal>
     <el-card>
       <el-table :data="list">
-        <el-table-column prop="name" label="名称" min-width="180" />
+        <el-table-column prop="name" label="名称" min-width="160" />
         <el-table-column label="容量" min-width="240">
           <template #default="{ row }">
             <template v-if="row.quota_total">
@@ -101,22 +103,22 @@ onMounted(load)
             <span v-else class="quota-text">未检查</span>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="96">
+        <el-table-column label="状态" min-width="100">
           <template #default="{ row }">
             <el-tag :type="row.status === 'active' ? 'success' : 'danger'" size="small" effect="light" round>
               {{ row.status === 'active' ? '正常' : '失效' }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="last_check_at" label="最近检查" width="170">
+        <el-table-column prop="last_check_at" label="最近检查" min-width="160">
           <template #default="{ row }">
             <span class="mono">{{ fmtTime(row.last_check_at) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="240" align="right">
+        <el-table-column label="操作" min-width="240" align="right">
           <template #default="{ row }">
             <el-button size="small" :loading="checking === row.id" @click="check(row)">检查</el-button>
-            <el-button size="small" :type="row.status === 'invalid' ? 'warning' : 'default'" @click="openFix(row)">更新 Cookie</el-button>
+            <el-button size="small" :type="row.status === 'invalid' ? 'warning' : 'default'" @click="openEdit(row)">编辑</el-button>
             <el-button size="small" type="danger" plain @click="remove(row)">删除</el-button>
           </template>
         </el-table-column>
@@ -127,17 +129,17 @@ onMounted(load)
     </el-card>
   </Reveal>
 
-  <el-dialog v-model="dlg" :title="editing ? '更新 Cookie' : '添加账号'" width="520px">
+  <el-dialog v-model="dlg" :title="editing ? '编辑账号' : '添加账号'" width="520px">
     <el-form label-position="top">
-      <el-form-item label="账号名称" v-if="!editing">
+      <el-form-item label="账号名称">
         <el-input v-model="form.name" placeholder="如：主账号" />
       </el-form-item>
-      <el-form-item label="粘贴 Cookie">
+      <el-form-item label="Cookie">
         <el-input
           v-model="form.cookie"
           type="textarea"
           :rows="4"
-          placeholder="在 pan.baidu.com 登录后，F12 → 网络 → 任一请求 → 请求标头 → 复制整段 Cookie，直接粘贴到这里"
+          :placeholder="editing ? '' : '在 pan.baidu.com 登录后，F12 → 网络 → 任一请求 → 请求标头 → 复制整段 Cookie，直接粘贴到这里'"
           class="mono cookie-input"
         />
       </el-form-item>

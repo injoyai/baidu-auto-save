@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"strings"
 	"time"
 )
 
@@ -17,6 +18,8 @@ type Account struct {
 	Status      string     `json:"status"`       // active | invalid
 	LastCheckAt *time.Time `json:"last_check_at"`
 	CreatedAt   time.Time  `json:"created_at"`
+	// Cookie 完整 Cookie（BDUSS=xxx; STOKEN=yyy 格式），供编辑回显
+	Cookie string `json:"cookie"`
 	// CookieMasked 供前端展示的脱敏 Cookie 摘要
 	CookieMasked string `json:"cookie_masked"`
 }
@@ -34,6 +37,13 @@ func scanAccount(row interface{ Scan(...any) error }) (*Account, error) {
 		a.LastCheckAt = &lastCheck.Time
 	}
 	a.CookieMasked = maskCookie(a.BDUSS)
+	// 组装完整 Cookie 串（与 engine.BuildCookieStr 同格式），供编辑回显
+	var sb strings.Builder
+	sb.WriteString("BDUSS=" + a.BDUSS)
+	if a.STOKEN != "" {
+		sb.WriteString("; STOKEN=" + a.STOKEN)
+	}
+	a.Cookie = sb.String()
 	return &a, nil
 }
 
@@ -87,6 +97,12 @@ func (d *DB) CreateAccount(a *Account) (int64, error) {
 func (d *DB) UpdateAccountCookie(id int64, bduss, stoken, cookiesJSON string) error {
 	_, err := d.Exec(`UPDATE accounts SET bduss=?, stoken=?, cookies_json=?, status='active' WHERE id=?`,
 		bduss, stoken, cookiesJSON, id)
+	return err
+}
+
+// RenameAccount 修改账号名称
+func (d *DB) RenameAccount(id int64, name string) error {
+	_, err := d.Exec(`UPDATE accounts SET name=? WHERE id=?`, name, id)
 	return err
 }
 

@@ -15,7 +15,7 @@
 1. **上游 BaiduPCS-Go 的 `internal/pcscommand` 包不可导入**（Go internal 规则），转存编排逻辑（RunShareTransfer 等）需自研；仅复用可导入的 **`baidupcs` 包（模块根目录下，非 `pcs/baidupcs`）**（分享页访问、提取码验证、目录列举、批量转存、重命名）。
 2. 重命名采用两步实现：转存成功后调用文件管理重命名接口（上游转存接口不支持逐文件 newname）。
 3. 去重两层：task_files 表 MD5 主判据（任务内）+ 转存请求 ondup=skip 兜底（含跨任务）。
-4. Cookie 失效修复路径：`PUT /accounts/:id` 更新（必须有，否则死锁）。
+4. Cookie 失效修复路径：`PUT /accounts/:id` 更新（必须有，否则死锁）；**该接口 2026-09-06 扩展为完整编辑**：name 必填（改名走 db.RenameAccount）、cookie 有值才更新。**按用户要求（2026-09-06）不过度设计**：账号列表接口直接返回完整 cookie（`Account.Cookie` 字段，scanAccount 组装 `BDUSS=xxx; STOKEN=yyy`，与 engine.BuildCookieStr 同格式），前端编辑弹窗直接回显完整 Cookie，不搞脱敏摘要展示——本工具为自托管单用户，Cookie 本就是用户自己粘贴的
 5. transfer_logs.id 即对外 run id（数据模型无独立 run_id 字段）。
 6. 开放推送 `POST /open/links` 创建任务后立即执行一次。
 
@@ -30,10 +30,11 @@
 - **转存错误处理**：百度「文件重复」响应 ErrNo 非 4，需同时匹配 ErrMsg contains 文件重复/已存在；同一分享不同目录可能存在同 MD5 文件，运行内需 seenMD5 map 去重（仅 DB 历史去重不够）。
 - **性能特征**：全量 3744 文件 ≈ 180 目录分组，瓶颈是 Mkdir 逐级串行请求 + 批次间 500ms 限速；首次慢属正常，后续增量只转新增 MD5 + 目录已存在（Mkdir 快速失败），显著加快。
 - `internal/scheduler`：动态 cron 管理（AddTask/RemoveTask/RunNow），启动时恢复 running→idle
+- **运行详情（2026-09-06）**：Engine 内置内存运行态上报（`live map[int64]*LiveStatus`，mu 保护，不落库）——RunTask 各阶段（访问分享页/验证提取码/遍历/去重/转存中 done/total/重命名）liveStage+liveLog 更新，日志上限 200 行（超出丢最旧），结束后快照保留 30s 供前端读最终状态再清理（防新一轮覆盖：指针比对）；API `GET /tasks/:id/status` 返回 {running(sched.Running), dbStatus, stage, done, total, logs, finished}；前端 `components/RunDialog.vue` 弹窗 1.5s 轮询展示阶段/进度条（total=0 时 indeterminate）/日志（自动滚底），结束自动停轮询并通知列表刷新；Tasks 列表运行中禁用「立即运行/删除」，状态标签和「详情」按钮均可打开 RunDialog
 - `internal/notify`：4 渠道通知（企业微信/Server酱/Telegram/自定义 webhook）
 - `internal/api`：Gin 路由（JWT 认证 + 开放推送 X-API-Token）+ embed SPA 静态托管
 - `main.go`：加载 config/config.yaml（自动生成模板）→ env 覆盖 → 默认值校验；数据目录来自配置
-- `web/`：Vue 3 SPA（7 视图），构建产物 dist 由 Go embed（占位 web/dist/index.html 在无前端构建时兜底）。前端设计语言为「极光 Aurora」token（App.vue 定义：深空侧栏 + 云白内容区，主色极光青 #14b8a6，渐变 --grad 青→天蓝→紫），页面统一用 Reveal 组件做入场瀑布动画；Settings 页为左主列（双列 CSS grid 表单）+ 右侧粘性操作卡布局；列表页表格列宽统一约定（2026-09-06）：标签列 width=96、时间列 width=170 固定、数字列 width=84 居中、Run ID width=90，仅文本列（名称/目录/摘要）用 min-width 弹性伸展
+- `web/`：Vue 3 SPA（6 视图），构建产物 dist 由 Go embed（占位 web/dist/index.html 在无前端构建时兜底）。前端设计语言为「极光 Aurora」token（App.vue 定义：深空侧栏 + 云白内容区，主色极光青 #14b8a6，渐变 --grad 青→天蓝→紫），页面统一用 Reveal 组件做入场瀑布动画；Settings 页为左主列（双列 CSS grid 表单）+ 右侧粘性操作卡布局；列表页表格列宽统一约定（2026-09-06 修订）：**全部列用 min-width、禁止写死 width**——Element Plus 只有 min-width 列会按比例瓜分表格剩余宽度并随屏幕自适应，混用 width 会导致固定列不伸缩、空间全灌给弹性列（视觉上有的挤有的宽）；min-width 值按内容占比定权重（如 摘要240/名称220/操作240，标签100/数字90/RunID90）；Dashboard 布局（2026-09-06 重构）：KPI 四卡 CSS grid（4→2→1 列响应式，顶边渐变发丝线 + AnimNumber）+ 账号容量 auto-fit minmax(250px,1fr) 网格 + 最近转存表格，弃用 el-row/el-col 固定栅格；**任务新建/编辑已改为弹窗**（2026-09-06）：`components/TaskDialog.vue`（四步向导收进 680px el-dialog，头部极光 flow 三点 + N/4 步指示，footer 右对齐，destroy-on-close + watch modelValue 重置表单/步骤/树，禁点遮罩与 ESC 关闭防丢数据），TaskEdit.vue 已删除、路由 tasks/new 与 tasks/:id/edit 已移除，列表「编辑」按钮不再跳转
 - `Dockerfile` / `docker-compose.yml` / `.dockerignore`
 
 ## 上游 API 关键事实

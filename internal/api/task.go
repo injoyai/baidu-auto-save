@@ -132,6 +132,7 @@ func (s *Server) registerTaskRoutes(g *gin.RouterGroup) {
 	g.POST("/tasks/:id/run", s.runTask)
 	g.POST("/tasks/:id/toggle", s.toggleTask)
 	g.GET("/tasks/:id/logs", s.taskLogs)
+	g.GET("/tasks/:id/status", s.taskStatus)
 	g.GET("/logs", s.allLogs)
 }
 
@@ -217,6 +218,35 @@ func (s *Server) runTask(c *gin.Context) {
 		return
 	}
 	ok(c, gin.H{"started": true})
+}
+
+// taskStatus 任务实时运行态（供详情弹窗轮询）
+func (s *Server) taskStatus(c *gin.Context) {
+	t, okT := s.pathIDTask(c)
+	if !okT {
+		return
+	}
+	lv := s.engine.Status(t.ID)
+	out := gin.H{
+		"running":  s.sched.Running(t.ID),
+		"dbStatus": t.Status,
+		"stage":    "",
+		"done":     0,
+		"total":    0,
+		"logs":     []string{},
+	}
+	if lv != nil {
+		logs := lv.Logs
+		if logs == nil {
+			logs = []string{}
+		}
+		out["stage"] = lv.Stage
+		out["done"] = lv.Done
+		out["total"] = lv.Total
+		out["logs"] = logs
+		out["finished"] = lv.Finished
+	}
+	ok(c, out)
 }
 
 func (s *Server) toggleTask(c *gin.Context) {

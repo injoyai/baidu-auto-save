@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"baidu-auto-save/internal/baidu"
@@ -43,6 +44,52 @@ type Engine struct {
 	newCli func(cookieStr string) (baidu.Client, error) // 便于测试注入
 	// 同一时刻最多一个转存在执行（设计 §5 并发约束）
 	sem chan struct{}
+
+	// 运行态上报（内存，仅供 UI 观测）：taskID → 阶段/进度/实时日志
+	mu    sync.Mutex
+	live  map[int64]*LiveStatus
+}
+
+// LiveStatus 任务的实时运行状态（Engine.RunTask 各阶段更新）
+type LiveStatus struct {
+	Stage    string   `json:"stage"`              // 当前阶段描述
+	Done     int64    `json:"done"`               // 已处理文件数（去重+转存）
+	Total    int64    `json:"total"`              // 待转存文件总数（发现阶段结束后固定）
+	Logs     []string `json:"logs"`               // 运行日志（最新在后，上限 200 行）
+	Started  time.Time `json:"-"`                 // 开跑时间（内部用）
+	Finished bool     `json:"finished"`           // 本次运行是否已结束
+}
+
+// liveLog 追加一行运行日志（运行结束后的日志经 TransferLog 落库，不在这里持久化）
+func (e *Engine) liveLog(id int64, format string, args ...any) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	lv, ok := e.live[id]
+	if !ok {
+		return
+	}
+	line := time.Now().Format("15:04:05") + "  " + fmt.Sprintf(format, args...)
+	if n := len(lv.Logs); n >= 200 {
+		lv.Logs = append(lv.Logs[n-199:], line)
+	} else {
+		lv.Logs = append(lv.Logs, line)
+	}
+}
+
+// liveStage 更新阶段与进度
+func (e *Engine) liveStage(id int64, stage string, done, total int64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if lv, ok := e.live[id]; ok {
+		lv.Stage, lv.Done, lv.Total = stage, done, total
+	}
+}
+
+// Status 返回任务当前运行态快照；未在运行（且无已结束快照）返回 nil
+func (e *Engine) Status(taskID int64) *LiveStatus {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.live[taskID]
 }
 
 // New 创建引擎
@@ -51,6 +98,7 @@ func New(database *db.DB) *Engine {
 		db:     database,
 		newCli: baidu.NewClient,
 		sem:    make(chan struct{}, 1),
+		live:   map[int64]*LiveStatus{},
 	}
 }
 
@@ -61,6 +109,26 @@ func (e *Engine) setNewClient(f func(string) (baidu.Client, error)) { e.newCli =
 func (e *Engine) RunTask(t *db.Task) (*Result, error) {
 	e.sem <- struct{}{}
 	defer func() { <-e.sem }()
+
+	// 初始化运行态快照（结束后保留 30s 供前端读到最终状态，随后清理）
+	lv := &LiveStatus{Stage: "准备中", Logs: []string{}, Started: time.Now()}
+	e.mu.Lock()
+	e.live[t.ID] = lv
+	e.mu.Unlock()
+	defer func() {
+		e.mu.Lock()
+		lv.Finished = true
+		e.mu.Unlock()
+		time.AfterFunc(30*time.Second, func() {
+			e.mu.Lock()
+			// 仅清理已结束且未被新一轮覆盖的快照
+			if cur, ok := e.live[t.ID]; ok && cur == lv {
+				delete(e.live, t.ID)
+			}
+			e.mu.Unlock()
+		})
+	}()
+	e.liveLog(t.ID, "任务「%s」开始执行", t.Name)
 
 	res := e.runTask(t)
 	// 写日志
@@ -76,6 +144,7 @@ func (e *Engine) RunTask(t *db.Task) (*Result, error) {
 		log.Printf("[engine] 写日志失败 task=%d: %v", t.ID, err)
 	}
 	res.LogID = id
+	e.liveLog(t.ID, "运行结束：%s（新转存 %d，跳过 %d）", resultString(res), res.NewFiles, res.Skipped)
 	return res, nil
 }
 
@@ -114,16 +183,21 @@ func (e *Engine) runTask(t *db.Task) *Result {
 	}
 
 	// 1. 解析 surl & 访问分享页
+	e.liveStage(t.ID, "访问分享页", 0, 0)
+	e.liveLog(t.ID, "访问分享页 %s", t.ShareURL)
 	tokens, err := cli.AccessSharePage(t.ShareURL)
 	if err != nil {
 		return classify(res, err)
 	}
 	// 2. 提取码验证
+	e.liveStage(t.ID, "验证提取码", 0, 0)
 	if err := cli.VerifyPwd(t.ShareURL, tokens, t.Pwd); err != nil {
 		return classify(res, err)
 	}
 
 	// 3. 遍历分享目录树 → 收集待转存文件
+	e.liveStage(t.ID, "遍历分享目录", 0, 0)
+	e.liveLog(t.ID, "遍历分享目录，应用过滤规则")
 	files, err := e.walkShare(cli, t)
 	if err != nil {
 		return classify(res, err)
@@ -132,8 +206,10 @@ func (e *Engine) runTask(t *db.Task) *Result {
 		res.Message = "分享中无符合条件的文件"
 		return res
 	}
+	e.liveLog(t.ID, "发现 %d 个待选文件", len(files))
 
 	// 4. MD5 去重（任务内）
+	e.liveStage(t.ID, "去重比对", 0, 0)
 	md5s := make([]string, 0, len(files))
 	for _, f := range files {
 		if f.MD5 != "" {
@@ -158,6 +234,7 @@ func (e *Engine) runTask(t *db.Task) *Result {
 		seenMD5[f.MD5] = true
 		pending = append(pending, f)
 	}
+	e.liveLog(t.ID, "待转存 %d 个，已转存跳过 %d 个", len(pending), res.Skipped)
 	if len(pending) == 0 {
 		res.Message = "全部文件均已转存"
 		return res
@@ -170,12 +247,20 @@ func (e *Engine) runTask(t *db.Task) *Result {
 	var transferred []*baidu.ShareFile
 	var lastErr error
 	mkdirCache := make(map[string]bool) // 本次运行内共享：同名目录只 Mkdir 一次
+	batches := 0
+	for _, group := range groups {
+		batches += (len(group) + defaultBatchSize - 1) / defaultBatchSize
+	}
+	e.liveStage(t.ID, "转存中", 0, int64(len(pending)))
+	batchNo := 0
 	for dest, group := range groups {
 		if err := ensureDirCached(cli, dest, mkdirCache); err != nil {
 			res.ErrClass, res.Message = ErrClassOther, "创建保存目录失败: "+err.Error()
 			return res
 		}
 		for _, batch := range splitBatches(group, defaultBatchSize) {
+			batchNo++
+			e.liveLog(t.ID, "转存批次 %d/%d（%d 个文件）→ %s", batchNo, batches, len(batch), dest)
 			if err := withRetry(func() error {
 				return cli.Transfer(fsidsOf(batch), dest)
 			}); err != nil {
@@ -184,9 +269,15 @@ func (e *Engine) runTask(t *db.Task) *Result {
 					return classify(res, err)
 				}
 				lastErr = err
+				e.liveLog(t.ID, "批次 %d 失败：%v", batchNo, err)
 				continue
 			}
 			transferred = append(transferred, batch...)
+			e.mu.Lock()
+			if lv, ok := e.live[t.ID]; ok {
+				lv.Done += int64(len(batch))
+			}
+			e.mu.Unlock()
 			// 限速：批次间稍作间隔，降低风控
 			time.Sleep(500 * time.Millisecond)
 		}
@@ -205,7 +296,9 @@ func (e *Engine) runTask(t *db.Task) *Result {
 	res.NewFiles = int64(len(transferred))
 
 	// 8. 重命名（两步实现：转存成功后处理）
-	if t.RegexReplace != "" && t.RegexPattern != "" {
+	if t.RegexReplace != "" && t.RegexPattern != "" && len(transferred) > 0 {
+		e.liveStage(t.ID, "重命名文件", int64(len(transferred)), int64(len(transferred)))
+		e.liveLog(t.ID, "按正则模板重命名 %d 个文件", len(transferred))
 		e.renameTransferred(cli, t, transferred)
 	}
 
