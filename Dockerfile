@@ -22,6 +22,9 @@ FROM alpine:3.20
 RUN apk add --no-cache tzdata ca-certificates
 COPY --from=build /baidu-auto-save /app/baidu-auto-save
 ENV TZ=Asia/Shanghai
+# 数据目录固定指向 /data（与 VOLUME、compose 及文档挂载约定一致），
+# 否则 config 模板默认 ./data 会落在 /app/data 导致重建容器丢库
+ENV DATA_DIR=/data
 WORKDIR /app
 VOLUME ["/data", "/app/config"]
 EXPOSE 8080
