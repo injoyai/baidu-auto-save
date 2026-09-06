@@ -7,7 +7,7 @@ COPY web/ .
 RUN npm run build
 
 # 阶段2: Go 构建（embed web/dist，纯静态免 CGO）
-FROM golang:1.25.0 AS build
+FROM golang:1.25.5 AS build
 WORKDIR /src
 # 先复制依赖文件利用缓存
 COPY go.mod go.sum ./
