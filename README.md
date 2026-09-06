@@ -20,11 +20,58 @@
 
 ### 🐳 方式一：Docker（推荐）
 
+#### 1. 使用 Docker Hub 镜像（最简单）
+
+```bash
+docker run -d \
+  --name baidu-auto-save \
+  -p 8080:8080 \
+  -v ./data:/data \
+  -v ./config:/app/config \
+  -e TZ=Asia/Shanghai \
+  injoyai/baidu-auto-save:latest
+```
+
+#### 2. 使用 docker compose
+
+克隆仓库后在项目根目录执行：
+
 ```bash
 docker compose up -d
 ```
 
-`docker-compose.yml` 已映射 `8080` 端口并挂载 `/data`（数据库）与 `/app/config`（配置）。
+`docker-compose.yml` 会本地构建镜像，映射 `8080` 端口并挂载 `./data`（数据库）与 `./config`（配置文件）。
+
+#### 3. 首次启动配置
+
+容器首次启动会在 `./config` 目录自动生成 `config.yaml` 配置模板后退出，编辑它填写登录密码：
+
+```yaml
+auth:
+  password: "你的登录密码"
+```
+
+然后重启容器：
+
+```bash
+docker restart baidu-auto-save
+```
+
+> 💡 也可以不写配置文件，直接用环境变量 `APP_PASSWORD` 指定密码启动（环境变量优先于配置文件）。
+>
+> 💡 镜像更新：`docker pull injoyai/baidu-auto-save:latest` 后重新创建容器即可，`data/` 与 `config/` 挂载在宿主机，数据不会丢失。
+
+浏览器访问 `http://localhost:8080`，用刚设置的密码登录。
+
+#### 本地构建镜像（可选）
+
+仓库内提供了一键构建推送脚本：
+
+```bash
+./docker-build.sh
+```
+
+默认构建 `injoyai/baidu-auto-save:latest` 并推送到 Docker Hub；如需自定义镜像名：`IMAGE=registry.example.com/foo/bar ./docker-build.sh`，不走代理时 `PROXY= ./docker-build.sh`。
 
 ### 🛠️ 方式二：从源码运行
 
