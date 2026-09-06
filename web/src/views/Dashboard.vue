@@ -17,6 +17,7 @@ function fmtSize(n) {
 
 const statusText = { idle: '空闲', running: '执行中', error: '异常', link_invalid: '链接失效' }
 const resultType = { success: 'success', skipped: 'info', failed: 'danger', partial: 'warning' }
+const resultText = { success: '成功', skipped: '无新增', failed: '失败', partial: '部分成功' }
 
 // 派生指标：任务总数 / 执行中 / 失效账号数
 const stat = computed(() => {
@@ -120,7 +121,7 @@ onMounted(async () => {
           <el-table-column prop="task_name" label="任务" min-width="160" />
           <el-table-column prop="result" label="结果" min-width="100">
             <template #default="{ row }">
-              <el-tag :type="resultType[row.result]" size="small" effect="light" round>{{ row.result }}</el-tag>
+              <el-tag :type="resultType[row.result]" size="small" effect="light" round>{{ resultText[row.result] || row.result }}</el-tag>
             </template>
           </el-table-column>
           <el-table-column prop="file_count" label="新转存" min-width="90" />
