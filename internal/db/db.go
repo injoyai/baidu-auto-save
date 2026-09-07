@@ -2,7 +2,9 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -95,6 +97,11 @@ func migrate(d *sql.DB) error {
 		WHERE quota_used > quota_total AND quota_total > 0`); err != nil {
 		return fmt.Errorf("migrate: repair reversed quota: %w", err)
 	}
+	// 数据修复：剥离存量任务勾选/保存目录中的 /apps/bypy 前缀
+	//（bypy 类工具写入的沙箱前缀曾被透传保存，导致落盘路径多出一层级）
+	if err := repairAppsBypyPaths(d); err != nil {
+		return fmt.Errorf("migrate: repair apps/bypy paths: %w", err)
+	}
 	// 轻量列补丁：已有库补 folder_renames 列（CREATE IF NOT EXISTS 不会对旧表补列）
 	col := "folder_renames"
 	rows, err := d.Query(`PRAGMA table_info(tasks)`)
@@ -122,6 +129,90 @@ func migrate(d *sql.DB) error {
 	if !has {
 		if _, err := d.Exec(`ALTER TABLE tasks ADD COLUMN folder_renames TEXT NOT NULL DEFAULT '{}'`); err != nil {
 			return fmt.Errorf("migrate: %w", err)
+		}
+	}
+	return nil
+}
+
+// appsBypyPrefix 百度 PCS 第三方应用沙箱目录标记（与 engine 侧语义一致）
+const appsBypyPrefix = "/apps/bypy"
+
+// stripAppsBypyPath 去掉路径开头的 /apps/bypy 前缀（保留前导 /）；无该前缀时原样返回
+func stripAppsBypyPath(p string) string {
+	s := strings.TrimPrefix(p, appsBypyPrefix)
+	switch {
+	case s == "":
+		return "/"
+	case s[0] == '/':
+		return s
+	default:
+		return p
+	}
+}
+
+// repairAppsBypyPaths 剥离存量任务 save_dir / folder_paths / folder_renames 键中的
+// /apps/bypy 前缀（幂等；folder_renames 键重写时以剥离后的键为准）
+func repairAppsBypyPaths(d *sql.DB) error {
+	rows, err := d.Query(`SELECT id, save_dir, folder_paths, folder_renames FROM tasks`)
+	if err != nil {
+		return err
+	}
+	type fix struct {
+		id                                  int64
+		saveDir, folderPaths, folderRenames string
+	}
+	var fixes []fix
+	for rows.Next() {
+		var f fix
+		if err := rows.Scan(&f.id, &f.saveDir, &f.folderPaths, &f.folderRenames); err != nil {
+			rows.Close()
+			return err
+		}
+		if !strings.Contains(f.saveDir+f.folderPaths+f.folderRenames, appsBypyPrefix) {
+			continue
+		}
+		f.saveDir = stripAppsBypyPath(f.saveDir)
+		var paths []string
+		if err := json.Unmarshal([]byte(f.folderPaths), &paths); err != nil {
+			rows.Close()
+			return fmt.Errorf("task %d folder_paths: %w", f.id, err)
+		}
+		for i, p := range paths {
+			paths[i] = stripAppsBypyPath(p)
+		}
+		if b, err := json.Marshal(paths); err != nil {
+			rows.Close()
+			return err
+		} else {
+			f.folderPaths = string(b)
+		}
+		var renames map[string]string
+		if err := json.Unmarshal([]byte(f.folderRenames), &renames); err != nil {
+			rows.Close()
+			return fmt.Errorf("task %d folder_renames: %w", f.id, err)
+		}
+		if len(renames) > 0 {
+			out := make(map[string]string, len(renames))
+			for k, v := range renames {
+				out[stripAppsBypyPath(k)] = v
+			}
+			if b, err := json.Marshal(out); err != nil {
+				rows.Close()
+				return err
+			} else {
+				f.folderRenames = string(b)
+			}
+		}
+		fixes = append(fixes, f)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, f := range fixes {
+		if _, err := d.Exec(`UPDATE tasks SET save_dir=?, folder_paths=?, folder_renames=? WHERE id=?`,
+			f.saveDir, f.folderPaths, f.folderRenames, f.id); err != nil {
+			return err
 		}
 	}
 	return nil

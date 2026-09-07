@@ -19,7 +19,7 @@ import (
 // ShareFile 分享目录中的文件/子目录条目
 type ShareFile struct {
 	FsID       int64  `json:"fs_id"`
-	Path       string `json:"path"`       // 分享内相对路径（从根目录起）
+	Path       string `json:"path"` // 分享内相对路径（从根目录起）
 	ServerName string `json:"server_name"`
 	MD5        string `json:"md5"`
 	Size       int64  `json:"size"`
@@ -333,6 +333,20 @@ func (c *client) ListDir(path string) ([]*baidupcs.FileDirectory, error) {
 		return nil, pcsErr
 	}
 	return data, nil
+}
+
+// IsNotExist 判断错误是否为「文件或目录不存在」类错误（用于区分目录被删除与网络等临时故障）
+func IsNotExist(err error) bool {
+	if err == nil {
+		return false
+	}
+	if pe, ok := err.(pcserror.Error); ok && pe != nil && pe.GetErrType() == pcserror.ErrTypeRemoteError {
+		switch pe.GetRemoteErrCode() {
+		case -9, 12, 31066: // pan api 与 pcs api 的「文件/目录不存在」错误码
+			return true
+		}
+	}
+	return strings.Contains(err.Error(), "不存在")
 }
 
 // 领域错误（供编排层分类处理）

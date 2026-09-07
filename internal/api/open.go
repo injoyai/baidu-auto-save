@@ -84,13 +84,13 @@ func (s *Server) openPush(c *gin.Context) {
 		return
 	}
 	id, err := s.db.CreateTask(&db.Task{
-		Name:     "推送-" + time.Now().Format("0102-1504"),
+		Name:      "推送-" + time.Now().Format("0102-1504"),
 		AccountID: accounts[0].ID,
-		ShareURL: req.URL,
-		Pwd:      req.Pwd,
-		SaveDir:  saveDir,
-		CronExpr: req.CronExpr,
-		Enabled:  true,
+		ShareURL:  req.URL,
+		Pwd:       req.Pwd,
+		SaveDir:   saveDir,
+		CronExpr:  req.CronExpr,
+		Enabled:   true,
 	})
 	if err != nil {
 		failErr(c, err)

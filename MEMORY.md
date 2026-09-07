@@ -26,6 +26,8 @@
 - `internal/baidu`：baidupcs 适配器（Client 接口 + 自研 ListShareDir 遍历 /share/list）
 - `internal/engine`：转存编排（walkShare/ensureDir/renameTransferred/classifyErr/withRetry），`BuildCookieStr` 已导出供 API 层复用；有完整单测（mock Client）
 - **目录结构保留（2026-09-05 修复）**：百度 Transfer(fsids, dest) 不会按 fs_id 保留分享内路径——整批落到 dest 平铺。destDirFor 必须把子目录层级显式编进 dest：文件落盘目录 = 保存目录/<改名B>/<相对最深改名命中目录的子路径>（无改名命中时 = 保存目录/<分享内相对路径>）。子目录分组后 ensureDir 负责逐级建目录（运行内 mkdirCache 缓存，父路径不重复请求）。
+- **同步语义（2026-09-06 修复 Bug 1）**：task_files 记录只增不删会导致网盘删除的文件永远被跳过。RunTask 在 MD5 去重后新增第 4.5 步 reconcileTaskFiles：对本次分享中「记录在案」的 MD5 按 task_files.path 的落盘目录列网盘（baidu.ListDir，按 MD5 比对不受用户重命名影响），目录中已无该 MD5 的记录删除（db.DeleteTaskFilesByMD5）使其重新转存；目录不存在（baidu.IsNotExist：远程错误码 -9/12/31066 或消息含「不存在」）视为整目录记录失效，其他错误保守保留不阻塞。代价：每次运行对每个含已转存文件的落盘目录多一次 ListDir 请求（按目录分组，不按文件数）。
+- **/apps/bypy 沙箱前缀（2026-09-06 修复 Bug 2）**：bypy 类第三方工具（app_id 266719 同源）写入的分享源目录树挂在 /apps/bypy 下，且 /share/list 对同一棵树**偶发**返回带前缀的路径形态（有时干净有时带前缀）。engine 三处统一在剥离前缀后的规范化空间处理：walkShare 过滤匹配（matchPath/underAny）、destDirFor 落盘路径、renameTransferred 重命名路径（后者顺带修复了嵌套目录下 Rename 用错基准目录导致静默失败的 Bug）。db.migrate 启动时幂等修复存量 tasks.save_dir/folder_paths/folder_renames 中的前缀（repairAppsBypyPaths）。注意：若分享树本身第一级就是真实目录 apps/bypy 会被误剥离（理论场景，可接受）。
 - **文件夹改名（folder_renames）**：tasks 表 JSON 列，map[勾选目录]→新名字；destDirFor 取「命中且配置了改名的最深勾选目录」为基准（级联勾选产生的无改名子级选中项不覆盖父级改名）。
 - **转存错误处理**：百度「文件重复」响应 ErrNo 非 4，需同时匹配 ErrMsg contains 文件重复/已存在；同一分享不同目录可能存在同 MD5 文件，运行内需 seenMD5 map 去重（仅 DB 历史去重不够）。
 - **性能特征**：全量 3744 文件 ≈ 180 目录分组，瓶颈是 Mkdir 逐级串行请求 + 批次间 500ms 限速；首次慢属正常，后续增量只转新增 MD5 + 目录已存在（Mkdir 快速失败），显著加快。
@@ -41,6 +43,7 @@
 
 - go.mod 伪版本：`v0.0.0-20260821135237-225bdd3b6cb2`（对应 v4.0.2 commit）
 - `NewPCSWithCookieStr(appID int, cookieStr string)`；**PCS 接口（quota/mkdir/rename/cp-mv）必须用 app_id=266719**：网页版 250528（PanAppID）已被百度对纯 Cookie 请求封禁（报 31030 pcs token not exist），266719 实测可用（2026-09-05 真实账号验证）；share/* 网页接口（verify/transfer/list）仍用 250528
+- **app_id=266719 的 PCS 接口有服务端 /apps/bypy 沙箱**（bypy 官方 AppKey 即 266719）：非 /apps/ 开头的 path 会被服务端重映射进沙箱（mkdir 会把目录建到 /apps/bypy 下）；本项目实际未踩此坑（mkdir 走的是分享路径本身干净的源），但任何新增的 PCS 写操作都需注意该沙箱约束
 - HTTPClient 用 `Req(...)` 方法（无 Do）；`jsonResult.Raw()` 是方法
 - AccessSharePage / PostShareQuery / SetStoken / Transfer / Rename / Mkdir / QuotaInfo / FilesDirectoriesList
 - `/share/list` 目录遍历上游只有注释代码，自研实现于 internal/baidu

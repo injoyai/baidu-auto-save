@@ -8,24 +8,24 @@ import (
 
 // Task 转存任务
 type Task struct {
-	ID                  int64            `json:"id"`
-	Name                string           `json:"name"`
-	AccountID           int64            `json:"account_id"`
-	ShareURL            string           `json:"share_url"`
-	Pwd                 string           `json:"pwd"`
-	SaveDir             string           `json:"save_dir"`
-	FolderPaths         []string         `json:"folder_paths"`
+	ID                  int64             `json:"id"`
+	Name                string            `json:"name"`
+	AccountID           int64             `json:"account_id"`
+	ShareURL            string            `json:"share_url"`
+	Pwd                 string            `json:"pwd"`
+	SaveDir             string            `json:"save_dir"`
+	FolderPaths         []string          `json:"folder_paths"`
 	FolderRenames       map[string]string `json:"folder_renames"` // 勾选目录 → 转存后的文件夹名（空值=不改名）
-	FolderFilter        string           `json:"folder_filter"`
-	ExcludeFolderFilter string           `json:"exclude_folder_filter"`
-	RegexPattern        string           `json:"regex_pattern"`
-	RegexReplace        string           `json:"regex_replace"`
-	CronExpr            string           `json:"cron_expr"`
-	Enabled             bool             `json:"enabled"`
-	Status              string           `json:"status"` // idle | running | error | link_invalid
-	LastRunAt           *time.Time       `json:"last_run_at"`
-	NextRunAt           *time.Time       `json:"next_run_at"`
-	CreatedAt           time.Time        `json:"created_at"`
+	FolderFilter        string            `json:"folder_filter"`
+	ExcludeFolderFilter string            `json:"exclude_folder_filter"`
+	RegexPattern        string            `json:"regex_pattern"`
+	RegexReplace        string            `json:"regex_replace"`
+	CronExpr            string            `json:"cron_expr"`
+	Enabled             bool              `json:"enabled"`
+	Status              string            `json:"status"` // idle | running | error | link_invalid
+	LastRunAt           *time.Time        `json:"last_run_at"`
+	NextRunAt           *time.Time        `json:"next_run_at"`
+	CreatedAt           time.Time         `json:"created_at"`
 }
 
 const taskColumns = `id, name, account_id, share_url, pwd, save_dir, folder_paths, folder_renames, folder_filter,

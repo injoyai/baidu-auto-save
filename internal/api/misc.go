@@ -20,21 +20,21 @@ func (s *Server) registerShareRoutes(g *gin.RouterGroup) {
 }
 
 type sharePreviewReq struct {
-	ShareURL string `json:"share_url"`
-	Pwd      string `json:"pwd"`
+	ShareURL  string `json:"share_url"`
+	Pwd       string `json:"pwd"`
 	AccountID int64  `json:"account_id"`
 	// Path 非空时仅返回该子目录内容（懒加载），为空返回根目录
 	Path string `json:"path"`
 }
 
 type shareNode struct {
-	FsID       int64  `json:"fs_id"`
-	Path       string `json:"path"`
-	Name       string `json:"name"`
-	MD5        string `json:"md5"`
-	Size       int64  `json:"size"`
-	IsDir      bool   `json:"is_dir"`
-	HasChildren bool  `json:"has_children"`
+	FsID        int64  `json:"fs_id"`
+	Path        string `json:"path"`
+	Name        string `json:"name"`
+	MD5         string `json:"md5"`
+	Size        int64  `json:"size"`
+	IsDir       bool   `json:"is_dir"`
+	HasChildren bool   `json:"has_children"`
 }
 
 // sharePreview 解析分享链接，返回指定层级目录内容
@@ -142,10 +142,10 @@ func (s *Server) cronPreview(c *gin.Context) {
 }
 
 type dashboardData struct {
-	Accounts     []*db.Account     `json:"accounts"`
-	TaskStatus   map[string]int64  `json:"task_status"`
-	Recent7Days  int64             `json:"recent_7d_files"`
-	RecentLogs   []*db.TransferLog `json:"recent_logs"`
+	Accounts    []*db.Account     `json:"accounts"`
+	TaskStatus  map[string]int64  `json:"task_status"`
+	Recent7Days int64             `json:"recent_7d_files"`
+	RecentLogs  []*db.TransferLog `json:"recent_logs"`
 }
 
 func (s *Server) dashboard(c *gin.Context) {

@@ -20,22 +20,22 @@ import (
 type ErrClass string
 
 const (
-	ErrClassNone       ErrClass = ""
-	ErrClassNetwork    ErrClass = "network"
-	ErrClassRateLimit  ErrClass = "rate_limit"
-	ErrClassCookieBad  ErrClass = "cookie_invalid"
-	ErrClassLinkDead   ErrClass = "link_invalid"
-	ErrClassPwdWrong   ErrClass = "pwd_wrong"
-	ErrClassOther      ErrClass = "other"
+	ErrClassNone      ErrClass = ""
+	ErrClassNetwork   ErrClass = "network"
+	ErrClassRateLimit ErrClass = "rate_limit"
+	ErrClassCookieBad ErrClass = "cookie_invalid"
+	ErrClassLinkDead  ErrClass = "link_invalid"
+	ErrClassPwdWrong  ErrClass = "pwd_wrong"
+	ErrClassOther     ErrClass = "other"
 )
 
 // Result 单次运行结果
 type Result struct {
-	LogID     int64
-	NewFiles  int64
-	Skipped   int64
-	ErrClass  ErrClass
-	Message   string
+	LogID    int64
+	NewFiles int64
+	Skipped  int64
+	ErrClass ErrClass
+	Message  string
 }
 
 // Engine 转存引擎
@@ -46,20 +46,20 @@ type Engine struct {
 	sem chan struct{}
 
 	// 运行态上报（内存，仅供 UI 观测）：taskID → 阶段/进度/实时日志
-	mu    sync.Mutex
-	live  map[int64]*LiveStatus
+	mu   sync.Mutex
+	live map[int64]*LiveStatus
 }
 
 // LiveStatus 任务的实时运行状态（Engine.RunTask 各阶段更新）
 type LiveStatus struct {
-	Stage     string   `json:"stage"`      // 当前阶段描述
-	Done      int64    `json:"done"`       // 已转存文件数
-	Total     int64    `json:"total"`      // 待转存文件总数（发现阶段结束后固定）
-	Logs      []string `json:"logs"`       // 运行日志（最新在后，上限 200 行）
-	Result    string   `json:"result"`     // success | skipped | failed（结束后）
-	ResultMsg string   `json:"result_msg"` // 结果摘要
-	Started   time.Time `json:"-"`         // 开跑时间（内部用）
-	Finished  bool     `json:"finished"`   // 本次运行是否已结束
+	Stage     string    `json:"stage"`      // 当前阶段描述
+	Done      int64     `json:"done"`       // 已转存文件数
+	Total     int64     `json:"total"`      // 待转存文件总数（发现阶段结束后固定）
+	Logs      []string  `json:"logs"`       // 运行日志（最新在后，上限 200 行）
+	Result    string    `json:"result"`     // success | skipped | failed（结束后）
+	ResultMsg string    `json:"result_msg"` // 结果摘要
+	Started   time.Time `json:"-"`          // 开跑时间（内部用）
+	Finished  bool      `json:"finished"`   // 本次运行是否已结束
 }
 
 // liveLog 追加一行运行日志（运行结束后的日志经 TransferLog 落库，不在这里持久化）
@@ -218,6 +218,12 @@ func (e *Engine) runTask(t *db.Task) *Result {
 		res.ErrClass, res.Message = ErrClassOther, "去重查询失败: "+err.Error()
 		return res
 	}
+	// 4.5 校正已转存记录与网盘实际情况：用户在网盘删除的文件要能重新同步，
+	// 不能仅凭 task_files 历史记录永久跳过
+	if len(known) > 0 {
+		e.liveStage(t.ID, "校验已转存记录", 0, 0)
+		known = e.reconcileTaskFiles(t, cli, md5s, known)
+	}
 	pending := make([]*baidu.ShareFile, 0, len(files))
 	seenMD5 := make(map[string]bool, len(files)) // 运行内去重：分享不同目录可能存在相同 MD5 的重复文件
 	for _, f := range files {
@@ -312,6 +318,89 @@ func (e *Engine) runTask(t *db.Task) *Result {
 	return res
 }
 
+// appsBypyPrefix 百度 PCS 第三方应用沙箱目录标记。bypy 等工具（app_id 266719 同源）
+// 写入的目录树带 /apps/bypy 前缀；分享源若曾被此类工具写入，遍历得到的路径会多出这一级，
+// 转存时必须剥离该前缀、保留其下真实结构（如 /apps/bypy/A/x → 落盘 保存目录/A/x）。
+const appsBypyPrefix = "/apps/bypy"
+
+// stripAppsBypy 去掉路径开头的 /apps/bypy 前缀（保留前导 /，保证与常规绝对路径
+// 同一规范化空间）；无该前缀时原样返回。防御 /apps/bypyx 这类同名前缀目录。
+func stripAppsBypy(p string) string {
+	s := strings.TrimPrefix(p, appsBypyPrefix)
+	switch {
+	case s == "":
+		return "/"
+	case s[0] == '/':
+		return s
+	default:
+		return p
+	}
+}
+
+// reconcileTaskFiles 校正 task_files 与网盘实际情况，返回校正后的已知 MD5 集合。
+// 背景：记录只增不删，用户在网盘删除文件后记录残留，导致该文件永远被跳过不再同步。
+// 做法：对本次分享中已「记录在案」的 MD5，按其落盘目录列网盘文件（按 MD5 比对，不受
+// 用户后续重命名影响）；目录中已无该 MD5 的记录删除，使其重新参与转存。
+// 目录列举失败（非「不存在」）时保守跳过该目录，保留记录不阻塞本次运行。
+func (e *Engine) reconcileTaskFiles(t *db.Task, cli baidu.Client, allMD5s []string, known map[string]bool) map[string]bool {
+	md5s := make([]string, 0, len(known))
+	for m := range known {
+		md5s = append(md5s, m)
+	}
+	rows, err := e.db.TaskFilesByMD5s(t.ID, md5s)
+	if err != nil {
+		log.Printf("[engine] 查询已转存记录失败 task=%d: %v", t.ID, err)
+		return known
+	}
+	byDir := make(map[string]map[string]bool) // 落盘目录 → 待核实的 md5 集合
+	for _, r := range rows {
+		dir := path.Dir(r.Path)
+		if byDir[dir] == nil {
+			byDir[dir] = map[string]bool{}
+		}
+		byDir[dir][r.MD5] = true
+	}
+	var gone []string
+	for dir, wants := range byDir {
+		files, err := cli.ListDir(dir)
+		if err != nil {
+			if baidu.IsNotExist(err) {
+				// 整个目录已被删除：该目录下记录全部失效
+				for m := range wants {
+					gone = append(gone, m)
+				}
+			}
+			continue // 网络等临时错误：保守保留记录
+		}
+		have := make(map[string]bool, len(files))
+		for _, f := range files {
+			if !f.Isdir && f.MD5 != "" {
+				have[f.MD5] = true
+			}
+		}
+		for m := range wants {
+			if !have[m] {
+				gone = append(gone, m)
+			}
+		}
+	}
+	if len(gone) == 0 {
+		return known
+	}
+	if err := e.db.DeleteTaskFilesByMD5(t.ID, gone); err != nil {
+		log.Printf("[engine] 清理失效转存记录失败 task=%d: %v", t.ID, err)
+		return known
+	}
+	e.liveLog(t.ID, "检测到 %d 个已转存文件在网盘中不存在，将重新转存", len(gone))
+	known, err = e.db.FilterKnownMD5(t.ID, allMD5s)
+	if err != nil {
+		// 已删除的记录不会查询失败；此处防御性兜底为空集（宁多转存不漏转存，
+		// 目标已存在的文件转存会被百度「文件重复」响应兜底）
+		known = map[string]bool{}
+	}
+	return known
+}
+
 const defaultBatchSize = 50
 
 // splitBatches 按上限切分批次
@@ -368,11 +457,12 @@ func (e *Engine) walkShare(cli baidu.Client, t *db.Task) ([]*baidu.ShareFile, er
 		for _, ent := range entries {
 			if ent.IsDir {
 				rel := ent.Path
-				// 过滤规则基于分享内相对路径
-				if includeRe != nil && !includeRe.MatchString(rel) {
+				// 过滤规则基于分享内相对路径；同时匹配原始与剥离 /apps/bypy 后的形式，
+				// 规则按哪种形式书写都能命中
+				if includeRe != nil && !matchPath(includeRe, rel) {
 					continue
 				}
-				if excludeRe != nil && excludeRe.MatchString(rel) {
+				if excludeRe != nil && matchPath(excludeRe, rel) {
 					continue
 				}
 				if err := walk(rel); err != nil {
@@ -383,8 +473,10 @@ func (e *Engine) walkShare(cli baidu.Client, t *db.Task) ([]*baidu.ShareFile, er
 				if fileRe != nil && !fileRe.MatchString(ent.ServerName) {
 					continue
 				}
-				// folder_paths 勾选：空=全部；否则文件必须位于勾选目录（含子级）
-				if len(t.FolderPaths) > 0 && !underAny(ent.Path, t.FolderPaths) {
+				// folder_paths 勾选：空=全部；否则文件必须位于勾选目录（含子级）。
+				// 勾选值与分享路径可能一边带 /apps/bypy 前缀一边不带，统一在
+				// 剥离前缀后的规范化空间匹配
+				if len(t.FolderPaths) > 0 && !underAny(stripAppsBypy(ent.Path), t.FolderPaths) {
 					continue
 				}
 				out = append(out, ent)
@@ -398,10 +490,16 @@ func (e *Engine) walkShare(cli baidu.Client, t *db.Task) ([]*baidu.ShareFile, er
 	return out, nil
 }
 
-// underAny 判断 p 是否等于 sel 或位于 sel 之下
+// matchPath 正则同时匹配原始路径与剥离 /apps/bypy 后的路径（分享源被 bypy 类
+// 工具污染时，过滤规则按哪种形式书写都能命中）
+func matchPath(re *regexp.Regexp, p string) bool {
+	return re.MatchString(p) || re.MatchString(stripAppsBypy(p))
+}
+
+// underAny 判断 p（已规范化）是否等于 sel 或位于 sel 之下；sel 勾选值统一剥离 /apps/bypy
 func underAny(p string, sel []string) bool {
 	for _, s := range sel {
-		s = strings.TrimSuffix(s, "/")
+		s = stripAppsBypy(strings.TrimSuffix(s, "/"))
 		if p == s || strings.HasPrefix(p, s+"/") {
 			return true
 		}
@@ -413,28 +511,36 @@ func underAny(p string, sel []string) bool {
 // 找出文件命中且配置了改名的最深勾选目录 sel（级联勾选会产生无改名的子级选中项，不作为基准），
 // 文件落到 保存目录/B/<相对 sel 的子目录>；无任何改名命中时落 保存目录/<分享内完整路径>。
 // 百度 Transfer 不会按 fsid 保留原路径，层级必须由目标目录显式携带。
+// 匹配与层级计算统一在剥离 /apps/bypy 前缀后的规范化空间进行。
 func destDirFor(t *db.Task, f *baidu.ShareFile) string {
-	best := "" // 命中且配置了改名的最深勾选目录
+	fp := stripAppsBypy(f.Path)
+	best := ""     // 命中且配置了改名的最深勾选目录（规范化形式）
+	bestName := "" // best 对应的改名
 	for _, sel := range t.FolderPaths {
-		sel = strings.TrimSuffix(sel, "/")
-		if f.Path != sel && !strings.HasPrefix(f.Path, sel+"/") {
+		s := stripAppsBypy(strings.TrimSuffix(sel, "/"))
+		if fp != s && !strings.HasPrefix(fp, s+"/") {
 			continue
 		}
-		if newName := strings.TrimSpace(t.FolderRenames[sel]); newName != "" && len(sel) > len(best) {
-			best = sel
+		// 改名键可能是勾选时的原始路径（分享树展示形式），也可能是迁移后的规范化形式
+		newName := strings.TrimSpace(t.FolderRenames[sel])
+		if newName == "" {
+			newName = strings.TrimSpace(t.FolderRenames[s])
+		}
+		if newName != "" && len(s) > len(best) {
+			best, bestName = s, newName
 		}
 	}
 	// 文件相对基准目录的子路径（目录部分）；无基准时用分享内完整路径
-	rel := f.Path
+	rel := fp
 	if best != "" {
-		rel = strings.TrimPrefix(f.Path, best+"/")
+		rel = strings.TrimPrefix(fp, best+"/")
 	}
 	relDir := path.Dir(rel)
 	if relDir == "." || relDir == "/" {
 		relDir = ""
 	}
-	if newName := strings.TrimSpace(t.FolderRenames[best]); best != "" && newName != "" {
-		return path.Join(t.SaveDir, newName, relDir)
+	if best != "" {
+		return path.Join(t.SaveDir, bestName, relDir)
 	}
 	return path.Join(t.SaveDir, relDir)
 }
@@ -486,8 +592,10 @@ func (e *Engine) renameTransferred(cli baidu.Client, t *db.Task, files []*baidu.
 		if newName == "" || newName == f.ServerName {
 			continue
 		}
-		from := path.Join(t.SaveDir, f.ServerName)
-		to := path.Join(t.SaveDir, newName)
+		// 文件实际落在 destDirFor 计算的子目录中（非保存目录根），重命名路径须基于同一目录
+		dir := destDirFor(t, f)
+		from := path.Join(dir, f.ServerName)
+		to := path.Join(dir, newName)
 		if err := cli.Rename(from, to); err != nil {
 			log.Printf("[engine] 重命名失败 %s → %s: %v", from, to, err)
 		}

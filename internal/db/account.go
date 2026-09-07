@@ -10,12 +10,12 @@ import (
 type Account struct {
 	ID          int64      `json:"id"`
 	Name        string     `json:"name"`
-	BDUSS       string     `json:"-"`            // 不直接暴露给前端
-	STOKEN      string     `json:"-"`            // 不直接暴露给前端
-	CookiesJSON string     `json:"-"`            // 其余补充 Cookie
-	QuotaUsed   int64      `json:"quota_used"`   // 已用容量(字节)
-	QuotaTotal  int64      `json:"quota_total"`  // 总容量(字节)
-	Status      string     `json:"status"`       // active | invalid
+	BDUSS       string     `json:"-"`           // 不直接暴露给前端
+	STOKEN      string     `json:"-"`           // 不直接暴露给前端
+	CookiesJSON string     `json:"-"`           // 其余补充 Cookie
+	QuotaUsed   int64      `json:"quota_used"`  // 已用容量(字节)
+	QuotaTotal  int64      `json:"quota_total"` // 总容量(字节)
+	Status      string     `json:"status"`      // active | invalid
 	LastCheckAt *time.Time `json:"last_check_at"`
 	CreatedAt   time.Time  `json:"created_at"`
 	// Cookie 完整 Cookie（BDUSS=xxx; STOKEN=yyy 格式），供编辑回显

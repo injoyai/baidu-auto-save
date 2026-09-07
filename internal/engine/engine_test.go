@@ -28,6 +28,7 @@ type mockCli struct {
 	verifyErr   error
 	listErr     error
 	quotaErr    error
+	disk        map[string][]*baidupcs.FileDirectory // 模拟网盘状态：目录 → 条目（Transfer 成功后写入）
 }
 
 func (m *mockCli) AccessSharePage(surl string) (map[string]string, error) {
@@ -52,12 +53,31 @@ func (m *mockCli) Transfer(fsids []int64, saveDir string) error {
 	m.transferred = append(m.transferred, fsids)
 	if m.transferErr != nil {
 		if err := m.transferErr[saveDir]; err != nil {
-			// 只失败第一次，模拟部分成功
+			// 只失败第一次，模拟部分成功（失败的批次不落盘）
 			m.transferErr[saveDir] = nil
 			return err
 		}
 	}
+	// 转存成功：文件落入模拟网盘目录（MD5 从分享条目反查）
+	if m.disk == nil {
+		m.disk = map[string][]*baidupcs.FileDirectory{}
+	}
+	for _, fsid := range fsids {
+		m.disk[saveDir] = append(m.disk[saveDir], &baidupcs.FileDirectory{MD5: m.md5ByFsID(fsid)})
+	}
 	return nil
+}
+
+// md5ByFsID 从分享条目反查 fsid 对应的 MD5
+func (m *mockCli) md5ByFsID(fsID int64) string {
+	for _, entries := range m.shareDirs {
+		for _, f := range entries {
+			if f.FsID == fsID {
+				return f.MD5
+			}
+		}
+	}
+	return ""
 }
 
 func (m *mockCli) Rename(from, to string) error {
@@ -72,7 +92,16 @@ func (m *mockCli) Mkdir(p string) error {
 	return nil
 }
 
-func (m *mockCli) ListDir(p string) ([]*baidupcs.FileDirectory, error) { return nil, nil }
+func (m *mockCli) ListDir(p string) ([]*baidupcs.FileDirectory, error) {
+	if m.disk == nil {
+		return nil, errors.New("目录不存在: " + p)
+	}
+	entries, ok := m.disk[p]
+	if !ok {
+		return nil, errors.New("目录不存在: " + p)
+	}
+	return entries, nil
+}
 
 // newTestEngine 建内存库 + 注入 mock 客户端的引擎
 func newTestEngine(t *testing.T, mc *mockCli) (*Engine, *db.DB) {
@@ -152,6 +181,94 @@ func TestRunTask_MDDedup(t *testing.T) {
 	}
 }
 
+func TestRunTask_ReDeletedFileSync(t *testing.T) {
+	// Bug 1 回归：已转存文件在网盘中被用户删除后，下次运行应重新转存
+	mc := &mockCli{shareDirs: map[string][]*baidu.ShareFile{
+		"": {file(1, "/a.txt", "aaa", 10)},
+	}}
+	e, database := newTestEngine(t, mc)
+	id, _ := database.CreateTask(mkTask(1))
+	task, _ := database.GetTask(id)
+
+	if res, _ := e.RunTask(task); res.NewFiles != 1 {
+		t.Fatalf("首次应转存 1 个: %+v", res)
+	}
+	// 模拟用户在网盘删除该文件（目录变空）
+	mc.disk["/save"] = nil
+	res, _ := e.RunTask(task)
+	if res.NewFiles != 1 || res.Skipped != 0 {
+		t.Fatalf("网盘删除后应重新转存: %+v", res)
+	}
+}
+
+func TestStripAppsBypy(t *testing.T) {
+	cases := map[string]string{
+		"/apps/bypy/A/x": "/A/x",
+		"/apps/bypy":     "/",
+		"/apps/bypy/":    "/",
+		"/normal/path":   "/normal/path",
+		"/apps/bypyx/A":  "/apps/bypyx/A", // 同名前缀目录不剥离
+	}
+	for in, want := range cases {
+		if got := stripAppsBypy(in); got != want {
+			t.Errorf("stripAppsBypy(%q) = %q, 期望 %q", in, got, want)
+		}
+	}
+}
+
+func TestDestDirFor_AppsBypy(t *testing.T) {
+	// Bug 2 回归：/apps/bypy 前缀不得透传到落盘路径
+	tk := mkTask(1)
+	tk.FolderPaths = []string{"/apps/bypy/A"}
+	tk.FolderRenames = map[string]string{"/apps/bypy/A": "B"}
+	if got := destDirFor(tk, &baidu.ShareFile{Path: "/apps/bypy/A/x.txt"}); got != "/save/B" {
+		t.Errorf("带前缀勾选应剥离: %q", got)
+	}
+
+	// 勾选值已规范化（无前缀），分享路径带前缀（存量任务迁移后场景）
+	tk2 := mkTask(1)
+	tk2.FolderPaths = []string{"/A"}
+	tk2.FolderRenames = map[string]string{"/A": "B"}
+	if got := destDirFor(tk2, &baidu.ShareFile{Path: "/apps/bypy/A/x.txt"}); got != "/save/B" {
+		t.Errorf("规范化勾选 + 带前缀分享应命中: %q", got)
+	}
+
+	// 无勾选整树转存：剥离后保留层级
+	tk3 := mkTask(1)
+	if got := destDirFor(tk3, &baidu.ShareFile{Path: "/apps/bypy/资金流向/每日更新/x.csv"}); got != "/save/资金流向/每日更新" {
+		t.Errorf("整树转存应剥离前缀并保留层级: %q", got)
+	}
+}
+
+func TestRunTask_AppsBypyShare(t *testing.T) {
+	// 分享源整棵树挂在 /apps/bypy 下（bypy 类工具写入）：落盘路径不得出现 /apps/bypy
+	mc := &mockCli{shareDirs: map[string][]*baidu.ShareFile{
+		"":                     {dir(9, "/apps/bypy/资金流向")},
+		"/apps/bypy/资金流向":      {dir(10, "/apps/bypy/资金流向/每日更新")},
+		"/apps/bypy/资金流向/每日更新": {file(1, "/apps/bypy/资金流向/每日更新/x.csv", "x1", 1)},
+	}}
+	e, database := newTestEngine(t, mc)
+	id, _ := database.CreateTask(mkTask(1))
+	task, _ := database.GetTask(id)
+
+	res, _ := e.RunTask(task)
+	if res.NewFiles != 1 {
+		t.Fatalf("应转存 1 个: %+v", res)
+	}
+	var gotPath string
+	if err := database.QueryRow(`SELECT path FROM task_files WHERE task_id=?`, task.ID).Scan(&gotPath); err != nil {
+		t.Fatalf("查询落盘记录失败: %v", err)
+	}
+	if gotPath != "/save/资金流向/每日更新/x.csv" {
+		t.Fatalf("落盘路径不应包含 /apps/bypy: %q", gotPath)
+	}
+	for _, m := range mc.mkdirs {
+		if strings.Contains(m, "apps/bypy") {
+			t.Errorf("创建目录不应包含 /apps/bypy: %q", m)
+		}
+	}
+}
+
 func TestRunTask_LinkInvalid(t *testing.T) {
 	mc := &mockCli{accessErr: baiduErrLinkInvalid}
 	e, database := newTestEngine(t, mc)
@@ -181,7 +298,7 @@ func TestRunTask_Batches(t *testing.T) {
 	for i := 1; i <= 120; i++ {
 		files = append(files, file(int64(i), fmt.Sprintf("/f%d.txt", i), fmt.Sprintf("md5-%d", i), 1))
 	}
-	mc := &mockCli{shareDirs: map[string][]*baidu.ShareFile{"" : files}}
+	mc := &mockCli{shareDirs: map[string][]*baidu.ShareFile{"": files}}
 	e, database := newTestEngine(t, mc)
 	id, _ := database.CreateTask(mkTask(1))
 	task, _ := database.GetTask(id)
@@ -222,10 +339,10 @@ func TestDestDirFor_FolderRename(t *testing.T) {
 	tk.FolderRenames = map[string]string{"/A": "B"}
 
 	cases := map[string]string{
-		"/A/x.txt":             "/save/B",             // 勾选目录 A 改名 B
-		"/A/sub/y.txt":         "/save/B/sub",         // A 的子级保留层级
-		"/A/sub/deep/z.txt":    "/save/B/sub/deep",    // 深层嵌套
-		"/other/w.txt":         "/save/other",         // 未勾选命中 → 保存目录 + 分享内路径（实际运行会被过滤）
+		"/A/x.txt":          "/save/B",          // 勾选目录 A 改名 B
+		"/A/sub/y.txt":      "/save/B/sub",      // A 的子级保留层级
+		"/A/sub/deep/z.txt": "/save/B/sub/deep", // 深层嵌套
+		"/other/w.txt":      "/save/other",      // 未勾选命中 → 保存目录 + 分享内路径（实际运行会被过滤）
 	}
 	for p, want := range cases {
 		f := &baidu.ShareFile{Path: p}
@@ -333,12 +450,12 @@ func TestSplitBatches(t *testing.T) {
 
 func TestClassifyErr(t *testing.T) {
 	cases := map[string]ErrClass{
-		"分享链接已失效":              ErrClassLinkDead,
-		"提取码错误":                  ErrClassPwdWrong,
-		"Cookie 缺少网盘 STOKEN":   ErrClassCookieBad,
-		"网络错误: timeout":           ErrClassNetwork,
-		"请求过快，请稍后再试":          ErrClassRateLimit,
-		"未知错误":                    ErrClassOther,
+		"分享链接已失效":            ErrClassLinkDead,
+		"提取码错误":              ErrClassPwdWrong,
+		"Cookie 缺少网盘 STOKEN": ErrClassCookieBad,
+		"网络错误: timeout":      ErrClassNetwork,
+		"请求过快，请稍后再试":         ErrClassRateLimit,
+		"未知错误":               ErrClassOther,
 	}
 	for msg, want := range cases {
 		if got := classifyErr(errors.New(msg)); got != want {

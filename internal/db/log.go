@@ -107,6 +107,58 @@ func (d *DB) FilterKnownMD5(taskID int64, md5s []string) (map[string]bool, error
 	return known, nil
 }
 
+// TaskFilesByMD5s 返回任务内指定 md5 的已转存记录（用于与网盘实际文件比对校正）
+func (d *DB) TaskFilesByMD5s(taskID int64, md5s []string) ([]*TaskFile, error) {
+	if len(md5s) == 0 {
+		return nil, nil
+	}
+	stmt, err := d.Prepare(`SELECT id, task_id, path, md5, size, transferred_at
+		FROM task_files WHERE task_id=? AND md5=?`)
+	if err != nil {
+		return nil, err
+	}
+	defer stmt.Close()
+	var out []*TaskFile
+	for _, m := range md5s {
+		rows, err := stmt.Query(taskID, m)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var f TaskFile
+			if err := rows.Scan(&f.ID, &f.TaskID, &f.Path, &f.MD5, &f.Size, &f.TransferredAt); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out = append(out, &f)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return out, nil
+}
+
+// DeleteTaskFilesByMD5 删除任务内指定 md5 的转存记录（网盘中已不存在的文件，使其可重新转存）
+func (d *DB) DeleteTaskFilesByMD5(taskID int64, md5s []string) error {
+	if len(md5s) == 0 {
+		return nil
+	}
+	stmt, err := d.Prepare(`DELETE FROM task_files WHERE task_id=? AND md5=?`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, m := range md5s {
+		if _, err := stmt.Exec(taskID, m); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // RecentTransferCount 近 N 天累计转存文件数（仪表盘）
 func (d *DB) RecentTransferCount(days int) (int64, error) {
 	var n int64
